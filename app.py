@@ -1,13 +1,36 @@
 import os
 import pandas as pd
 import streamlit as st
+import urllib.parse as up
 
-# ---------- Page setup ----------
-st.set_page_config(page_title="Nurse NCLEX Coach", page_icon="🩺", layout="centered")
-st.title("🩺 Nurse NCLEX Coach")
+# ============= BRAND / PILOT SETTINGS =============
+BRAND_NAME = "Nurse NCLEX Coach"
+ACCENT_HEX = "#6C63FF"  # tweak if you want
+FOOTER_TEXT = "© Your Brand • Educational use only • Not medical advice."
+# Put your Google Form "base" URL here (leave "" to hide feedback link)
+# Example: "https://docs.google.com/forms/d/e/FORM_ID/viewform"
+FEEDBACK_FORM_BASE = ""
+
+# Field IDs from your Google Form's "Get prefilled link" (optional)
+FORM_FIELD_QID   = "entry.111111"  # Question ID
+FORM_FIELD_CAT   = "entry.222222"  # Category
+FORM_FIELD_TYPE  = "entry.333333"  # Type
+
+# ============= PAGE SETUP =============
+st.set_page_config(page_title=BRAND_NAME, page_icon="🩺", layout="centered")
+st.markdown(
+    f"""
+    <style>
+      .st-emotion-cache-ocqkz7 {{ color:{ACCENT_HEX} !important; }} /* some titles */
+      .stButton>button {{ border-radius:10px; }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.title(f"🩺 {BRAND_NAME}")
 st.caption("Practice NCLEX-style questions with instant rationales. Educational use only.")
 
-# ---------- Data loading ----------
+# ============= DATA LOADING =============
 @st.cache_data
 def load_questions():
     path = "nclex_questions.csv"
@@ -40,7 +63,7 @@ st.caption(
     f"{df['Last Updated'].max() if 'Last Updated' in df.columns else '—'}"
 )
 
-# ---------- Sidebar: filters & score ----------
+# ============= SIDEBAR FILTERS & SCORE =============
 if "score" not in st.session_state:
     st.session_state.score = {"total": 0, "correct": 0}
 
@@ -63,19 +86,14 @@ def filtered_df():
         d = d[d["Difficulty"] == sel_diff]
     return d
 
-# ---------- Helpers ----------
+# ============= HELPERS =============
 LABELS_ALPHA = ["A", "B", "C", "D", "E"]
 
 def parse_options(opt_str: str):
-    """Split pipe-delimited options and trim."""
     parts = [p.strip() for p in str(opt_str).split("|")]
     return [p for p in parts if p]
 
 def get_selected_label(choice_text: str):
-    """
-    Extract the leading label from a choice like 'A) foo' or '1) foo'.
-    Returns 'A'/'B'/... or '1'/'2'/...; None if not found.
-    """
     if not choice_text:
         return None
     if ") " in choice_text:
@@ -83,12 +101,10 @@ def get_selected_label(choice_text: str):
     return None
 
 def normalize_sata_selection(selections):
-    """Turn a list of selected option texts into label strings (e.g., ['1','4'] or ['A','C'])."""
     labels = []
     for s in selections:
         lab = get_selected_label(s)
         if lab is None:
-            # fallback: try to map by list position
             try:
                 idx = selections.index(s)
                 lab = str(idx + 1)
@@ -98,10 +114,6 @@ def normalize_sata_selection(selections):
     return labels
 
 def check_answer(row, user_choice, user_multi):
-    """
-    Return True/False depending on whether the user's selection matches the correct answer(s).
-    Works for MCQ and SATA (select-all-that-apply).
-    """
     correct_field = str(row["Correct Answer(s)"]).strip()
     qtype = (row["Type"] or "").strip().upper()
 
@@ -110,12 +122,10 @@ def check_answer(row, user_choice, user_multi):
         sel_labels = set(normalize_sata_selection(user_multi or []))
         return sel_labels == correct_set
 
-    # MCQ, Case, Prioritization => one choice only
     if not user_choice:
         return False
     picked_label = get_selected_label(user_choice)
 
-    # Map numeric '2' -> 'B'
     if picked_label and picked_label.isdigit():
         try:
             picked_label = LABELS_ALPHA[int(picked_label) - 1]
@@ -124,61 +134,114 @@ def check_answer(row, user_choice, user_multi):
 
     return (picked_label or "").upper() == correct_field.upper()
 
-# ---------- Main area ----------
-if "current_row" not in st.session_state:
-    st.session_state.current_row = None
+# ============= SESSION STATE (Daily 10) =============
+ss = st.session_state
+if "current_row" not in ss:
+    ss.current_row = None
+if "in_batch" not in ss:
+    ss.in_batch = False
+if "batch_df" not in ss:
+    ss.batch_df = None
+if "batch_idx" not in ss:
+    ss.batch_idx = 0
+if "answered" not in ss:
+    ss.answered = False
+if "batch_correct" not in ss:
+    ss.batch_correct = 0
 
-col1, col2 = st.columns([1, 1])
+# ============= TOP CONTROLS =============
+col_l, col_r = st.columns([1,1])
 
-if col1.button("🎲 New Question"):
-    d = filtered_df()
-    if d.empty:
-        st.warning("No questions match your filters.")
+# Start/stop Daily 10
+with col_l:
+    if not ss.in_batch:
+        if st.button("🔥 Start Daily 10"):
+            d = filtered_df()
+            if d.empty:
+                st.warning("No questions match your filters.")
+            else:
+                take = min(10, len(d))
+                ss.batch_df = d.sample(take).reset_index(drop=True)
+                ss.batch_idx = 0
+                ss.in_batch = True
+                ss.answered = False
+                ss.batch_correct = 0
+                ss.current_row = ss.batch_df.iloc[0]
+                ss.user_choice = None
+                ss.user_multi = []
     else:
-        st.session_state.current_row = d.sample(1).iloc[0]
-        st.session_state.feedback = None
-        st.session_state.user_choice = None
-        st.session_state.user_multi = []
+        pb = (ss.batch_idx) / max(1, len(ss.batch_df))
+        st.progress(pb, text=f"Daily 10 • {ss.batch_idx}/{len(ss.batch_df)} done")
+        if st.button("⏹ End Daily 10"):
+            ss.in_batch = False
+            st.experimental_rerun()
 
-if st.session_state.current_row is not None:
-    row = st.session_state.current_row
+# Ad-hoc random practice
+with col_r:
+    if not ss.in_batch and st.button("🎲 New Question"):
+        d = filtered_df()
+        if d.empty:
+            st.warning("No questions match your filters.")
+        else:
+            ss.current_row = d.sample(1).iloc[0]
+            ss.answered = False
+            ss.user_choice = None
+            ss.user_multi = []
+
+# ============= RENDER QUESTION =============
+if ss.current_row is not None:
+    row = ss.current_row
     st.subheader(row["Question"])
     st.caption(f"Category: {row['Category']} • Type: {row['Type']} • Difficulty: {row['Difficulty']}")
 
     options = parse_options(row["Options (A–E)"])
+    qtype = (row["Type"] or "").strip().upper()
 
-    # UI for selection
-    if (row["Type"] or "").strip().upper() == "SATA":
-        st.session_state.user_multi = st.multiselect(
-            "Select all that apply:", options, default=st.session_state.get("user_multi", [])
+    if qtype == "SATA":
+        ss.user_multi = st.multiselect(
+            "Select all that apply:", options, default=ss.get("user_multi", [])
         )
     else:
-        st.session_state.user_choice = st.radio("Choose one:", options, index=None)
+        ss.user_choice = st.radio("Choose one:", options, index=None)
 
-    # ---------- CHECK ANSWER (grade + rationale only) ----------
-    if col2.button("✅ Check Answer"):
-        st.session_state.score["total"] += 1
-
-        ok = check_answer(
-            row,
-            st.session_state.get("user_choice"),
-            st.session_state.get("user_multi"),
-        )
-
+    # ---- Grade (rationale only) ----
+    if st.button("✅ Check Answer", type="primary"):
+        ss.score["total"] += 1
+        ok = check_answer(row, ss.get("user_choice"), ss.get("user_multi"))
         if ok:
             st.success("Correct! 🎉")
-            st.session_state.score["correct"] += 1
+            ss.score["correct"] += 1
+            if ss.in_batch:
+                ss.batch_correct += 1
         else:
             st.error("Not quite. Keep going — you’ve got this.")
-
-        # Always show the rationale only
         st.info(f"**Rationale:** {row['Rationale']}")
-        st.caption(f"Last Updated: {row['Last Updated']}")
+        st.caption(f"Last Updated: {row.get('Last Updated','—')}")
+        ss.answered = True
 
-# ---------- Sidebar: progress ----------
+    # ---- Next in Daily 10 ----
+    if ss.in_batch and ss.answered:
+        coln1, coln2 = st.columns([1,4])
+        with coln1:
+            if st.button("➡ Next"):
+                ss.batch_idx += 1
+                ss.answered = False
+                if ss.batch_idx >= len(ss.batch_df):
+                    # summary
+                    total = len(ss.batch_df)
+                    correct = ss.batch_correct
+                    st.success(f"Daily 10 complete! Score: {correct}/{total} ({round(100*correct/total)}%)")
+                    ss.in_batch = False
+                    ss.current_row = None
+                else:
+                    ss.current_row = ss.batch_df.iloc[ss.batch_idx]
+                    ss.user_choice = None
+                    ss.user_multi = []
+
+# ============= SIDEBAR: PROGRESS & FOOTER =============
 st.sidebar.header("Progress")
-t = st.session_state.score["total"]
-c = st.session_state.score["correct"]
+t = ss.score["total"]
+c = ss.score["correct"]
 if t:
     pct = round(100 * c / t)
     st.sidebar.metric("Score", f"{c}/{t}", delta=f"{pct}%")
@@ -186,4 +249,21 @@ else:
     st.sidebar.write("Score: 0/0")
 
 st.sidebar.markdown("---")
-st.sidebar.write("© Your Brand • Educational use only • Not medical advice.")
+st.sidebar.write(FOOTER_TEXT)
+
+# ============= FEEDBACK LINK (optional) =============
+def feedback_link(row):
+    if not FEEDBACK_FORM_BASE:
+        return ""
+    params = {
+        FORM_FIELD_QID: int(row.get("ID", 0)),
+        FORM_FIELD_CAT: str(row.get("Category", "")),
+        FORM_FIELD_TYPE: str(row.get("Type", "")),
+    }
+    return FEEDBACK_FORM_BASE + "?" + up.urlencode(params)
+
+if ss.current_row is not None and FEEDBACK_FORM_BASE:
+    with st.expander("💬 Give quick feedback on this question"):
+        url = feedback_link(ss.current_row)
+        st.markdown(f"[Open feedback form]({url})")
+
